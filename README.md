@@ -35,6 +35,11 @@ Trong ngành cho vay tín dụng, việc dự đoán chính xác khách hàng c�
 - ✅ Tăng lợi nhuận bằng cách cho vay đúng đối tượng
 - ✅ Giảm chi phí xử lý nợ xấu
 
+### ⚠️ Thách thức chính
+- **Recall hiện tại chỉ 0.22%**: Model bỏ sót 99.78% trường hợp vỡ nợ
+- **Cần cải thiện**: Focus vào tăng Recall, chấp nhận trade-off Precision
+- **Business impact**: False Negative (bỏ sót vỡ nợ) gây thiệt hại lớn hơn False Positive
+
 ### Độ khó
 - **Dữ liệu mất cân bằng nghiêm trọng**: Tỷ lệ vỡ nợ chỉ ~8% (1:11.5)
 - **Nhiều missing values**: Một số cột thiếu >70% dữ liệu
@@ -201,46 +206,62 @@ EXT_SOURCE_MEAN = mean(EXT_SOURCE_1, EXT_SOURCE_2, EXT_SOURCE_3)
 
 | Metric | Baseline (Raw Data) | Processed (Optimized) | Improvement |
 |--------|---------------------|----------------------|-------------|
-| **Accuracy** | 0.7200 | 0.8450 | **+17.36%** ✅ |
-| **AUC** | 0.7500 | 0.8200 | **+9.33%** ✅ |
-| **Precision** | 0.6500 | 0.7800 | **+20.00%** ✅ |
-| **Recall** | 0.0800 | 0.6500 | **+712.50%** ✅ |
-| **F1-Score** | 0.1400 | 0.7200 | **+414.29%** ✅ |
+| **Accuracy** | 0.9193 | 0.9194 | **+0.01%** ✅ |
+| **AUC** | 0.6742 | 0.7152 | **+6.09%** ✅ |
+| **Recall** | 0.0002 | 0.0022 | **+1000.00%** ✅ |
+| **F1-Score** | 0.0004 | 0.0044 | **+1000.00%** ✅ |
 
 ### Giải thích kết quả
 
-#### ✅ **Recall tăng mạnh (+712%)** - Quan trọng nhất!
-- Baseline: Chỉ phát hiện 8% trường hợp vỡ nợ
-- Optimized: Phát hiện 65% trường hợp vỡ nợ
-- **Ý nghĩa**: Giảm đáng kể rủi ro cho vay sai
+#### ✅ **AUC tăng 6.09%** - Cải thiện quan trọng!
+- Baseline: AUC = 0.6742 (khả năng phân biệt class trung bình)
+- Optimized: AUC = 0.7152 (cải thiện đáng kể)
+- **Ý nghĩa**: Model phân biệt tốt hơn giữa khách hàng vỡ nợ và không vỡ nợ
 
-#### ✅ **Accuracy tăng 17%**
-- Từ 72% → 84.5%
-- Cải thiện đáng kể khả năng dự đoán tổng thể
+#### ✅ **Recall tăng x10 (từ 0.02% → 0.22%)**
+- Baseline: Chỉ phát hiện 0.02% trường hợp vỡ nợ (gần như bỏ sót tất cả)
+- Optimized: Phát hiện 0.22% trường hợp vỡ nợ
+- **Lưu ý**: Recall vẫn thấp do dữ liệu mất cân bằng nghiêm trọng (8% vỡ nợ)
+- **Ý nghĩa**: Tăng 10 lần khả năng phát hiện rủi ro
 
-#### ✅ **AUC tăng 9%**
-- Từ 0.75 → 0.82
-- Model phân biệt class tốt hơn
+#### ⚠️ **Accuracy cao (91.9%) nhưng không phản ánh đúng**
+- Do dữ liệu imbalanced (92% class 0), model dự đoán phần lớn là "không vỡ nợ"
+- **Không nên đánh giá chỉ bằng Accuracy** trong bài toán imbalanced
+- **Nên focus**: AUC, Recall, F1-Score quan trọng hơn
 
 ### Best Model
 ```
 🏆 Model: Gradient Boosting Classifier
-🎯 Optimal Threshold: 0.42
-📊 Test AUC: 0.8245
-✅ Test Accuracy: 0.8478
+🎯 Optimal Threshold: 0.65
+📊 Test AUC: 0.7152
+✅ Test Accuracy: 0.9194
+⚠️  Recall: 0.0022 (cần cải thiện)
 ```
 
 ### Hiệu quả của các kỹ thuật
 
-| Kỹ thuật | Cải thiện dự kiến |
+| Kỹ thuật | Cải thiện thực tế |
 |----------|-------------------|
-| Feature Selection | +3-5% accuracy |
-| RobustScaler | +2-3% accuracy |
-| SMOTETomek | +10-15% recall |
-| Multiple Models | +5-8% accuracy |
-| Ensemble | +2-4% accuracy |
-| Threshold Optimization | +5-10% accuracy |
-| **Tổng cộng** | **+15-30% overall** |
+| Feature Selection | Giảm noise, tăng stability |
+| RobustScaler | Xử lý outliers tốt hơn |
+| SMOTETomek | Tăng Recall x10 (0.02% → 0.22%) |
+| Multiple Models | Gradient Boosting thắng (+1% AUC vs Logistic) |
+| Ensemble | Kết hợp tốt nhiều models |
+| Threshold Optimization | Tối ưu ở 0.65 thay vì 0.5 |
+| **Tổng cộng** | **AUC +6%, Recall +1000%** |
+
+### ⚠️ Thách thức còn lại
+
+**1. Recall vẫn rất thấp (0.22%)**
+- **Nguyên nhân**: Dữ liệu imbalanced nghiêm trọng (1:11.5)
+- **Giải pháp**: 
+  - Tăng `sampling_strategy` của SMOTE (hiện tại 0.5 → thử 0.8 hoặc 1.0)
+  - Thử class_weight trong models
+  - Điều chỉnh threshold thấp hơn (0.3-0.4) để tăng Recall, trade-off Precision
+
+**2. Cần balance giữa Precision và Recall**
+- **Business context**: False Negative (bỏ sót vỡ nợ) tốn kém hơn False Positive
+- **Khuyến nghị**: Ưu tiên Recall cao hơn, chấp nhận Precision thấp hơn
 
 ## 🚀 Cài đặt
 
@@ -248,33 +269,6 @@ EXT_SOURCE_MEAN = mean(EXT_SOURCE_1, EXT_SOURCE_2, EXT_SOURCE_3)
 - Python 3.8+
 - RAM: 8GB+ (khuyến nghị 16GB)
 - Disk: 2GB+ (cho dataset và models)
-
-### Cài đặt thư viện
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/credit-default-prediction.git
-cd credit-default-prediction
-
-# Tạo virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Cài đặt dependencies
-pip install -r requirements.txt
-```
-
-### requirements.txt
-```txt
-pandas>=1.3.0
-numpy>=1.21.0
-matplotlib>=3.4.0
-seaborn>=0.11.0
-scikit-learn>=1.0.0
-scipy>=1.7.0
-imbalanced-learn>=0.8.0
-jupyter>=1.0.0
-```
 
 ## 💻 Sử dụng
 
@@ -300,36 +294,7 @@ python -c "from pttqhdl import *; run_preprocessing()"
 python -c "from pttqhdl import *; train_models()"
 ```
 
-### 3. Dự đoán cho dữ liệu mới
-
-```python
-import pandas as pd
-import pickle
-
-# Load model đã train
-with open('best_model.pkl', 'rb') as f:
-    model = pickle.load(f)
-
-# Load dữ liệu mới
-new_data = pd.read_csv('new_applications.csv')
-
-# Tiền xử lý (apply cùng pipeline)
-new_data_processed = preprocess_pipeline.transform(new_data)
-
-# Dự đoán
-predictions = model.predict_proba(new_data_processed)[:, 1]
-risk_level = ['Low Risk' if p < 0.42 else 'High Risk' for p in predictions]
-
-# Kết quả
-results = pd.DataFrame({
-    'Application_ID': new_data['SK_ID_CURR'],
-    'Default_Probability': predictions,
-    'Risk_Level': risk_level
-})
-print(results)
-```
-
-## 📁 Cấu trúc thư mục
+## 📁 Có thể làm theo Cấu trúc thư mục
 
 ```
 credit-default-prediction/
@@ -459,8 +424,27 @@ Threshold Optimization (80 tests)
 
 #### 4. Tại sao optimize threshold?
 - Default threshold 0.5 không tối ưu cho imbalanced data
-- Tìm threshold tối ưu có thể tăng 5-10% accuracy
-- Cho phép trade-off giữa precision và recall
+- Threshold 0.65 cho kết quả tốt nhất trong trường hợp này
+- Trade-off: Threshold cao → Precision cao, Recall thấp
+- **Cải thiện tiếp**: Thử threshold thấp hơn (0.3-0.4) để tăng Recall
+
+#### 5. Tại sao Recall vẫn thấp?
+- **Dữ liệu imbalanced cực kỳ nghiêm trọng**: 91.9% vs 8.1%
+- SMOTETomek với `sampling_strategy=0.5` chỉ cân bằng một phần
+- **Giải pháp đề xuất**:
+  ```python
+  # Thay vì sampling_strategy=0.5
+  smt = SMOTETomek(sampling_strategy=0.8)  # Hoặc 1.0
+  
+  # Hoặc dùng class_weight
+  model = GradientBoostingClassifier(
+      # ... other params
+      # Tự động điều chỉnh trọng số theo tỷ lệ class
+  )
+  
+  # Hoặc điều chỉnh threshold thấp hơn
+  optimal_threshold = 0.35  # Thay vì 0.65
+  ```
 
 ## 📚 Tài liệu tham khảo
 
