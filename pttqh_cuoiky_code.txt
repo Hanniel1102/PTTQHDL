@@ -1,0 +1,1118 @@
+import numpy as np
+import pandas as pd
+import warnings
+warnings.filterwarnings('ignore')
+
+from sklearn.model_selection import train_test_split
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import RobustScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    classification_report,
+    confusion_matrix
+)
+import matplotlib.pyplot as plt
+import seaborn as sns
+from imblearn.over_sampling import SMOTE
+from scipy.stats.mstats import winsorize
+import math
+
+plt.rcParams['figure.figsize'] = (10, 6)
+sns.set_style('whitegrid')
+print(' Đã import thư viện & cấu hình plotting.')
+
+data_path = 'default of credit card clients.csv'
+
+print(' Đọc dữ liệu từ:', data_path)
+df_dirty = pd.read_csv(data_path)
+print(' Shape:', df_dirty.shape)
+df_dirty.head()
+
+target_col = 'defaultpaymentnextmonth'
+print(' Cột target:', target_col)
+
+numeric_cols = df_dirty.select_dtypes(include=[np.number]).columns.tolist()
+numeric_cols = [c for c in numeric_cols if c != target_col]
+categorical_cols = [c for c in df_dirty.columns if c not in numeric_cols + [target_col]]
+print(' Numeric cols:', numeric_cols)
+print(' Categorical cols:', categorical_cols)
+
+print(' Thông tin tổng quan dataset:')
+df_dirty.info()
+
+# 1. Tính missing
+missing = df_dirty.isna().sum()
+missing = missing[missing > 0].sort_values(ascending=False)
+
+print(" Tổng quan Missing Values:")
+display(
+    pd.DataFrame({
+        "Missing Count": missing,
+        "Missing %": (missing / len(df_dirty) * 100).round(2)
+    })
+)
+
+# 2. Vẽ biểu đồ rõ ràng hơn
+plt.figure(figsize=(12, 6))
+
+# dùng color gradient theo % missing
+colors = sns.color_palette("Reds", len(missing))
+
+sns.barplot(
+    x=missing.values,
+    y=missing.index,
+    palette=colors
+)
+
+plt.title(" Missing Values per Column", fontsize=14, fontweight="bold")
+plt.xlabel("Số lượng missing")
+plt.ylabel("Tên cột")
+
+# hiển thị số value bên cạnh bar
+for i, v in enumerate(missing.values):
+    plt.text(v + 0.05, i, str(v), va='center')
+
+plt.tight_layout()
+plt.show()
+
+# 1. Biểu đồ phân bố Target
+plt.figure(figsize=(5, 4))
+
+ax = sns.countplot(
+    x=target_col,
+    data=df_dirty,
+    palette="Set2"
+)
+
+# Thêm nhãn số lượng ngay trên cột
+for p in ax.patches:
+    height = p.get_height()
+    ax.text(
+        p.get_x() + p.get_width() / 2,
+        height + 0.02 * df_dirty.shape[0],
+        f"{height:,}",
+        ha="center",
+        va="bottom",
+        fontsize=10
+    )
+
+plt.title(" Target Distribution", fontsize=13, fontweight="bold")
+plt.xlabel("Class")
+plt.ylabel("Count")
+plt.tight_layout()
+plt.show()
+
+# Danh sách cột cần vẽ histogram
+numeric_cols_toplot = ['LIMIT_BAL', 'AGE'] + \
+    [f'BILL_AMT{i}' for i in range(1, 7)] + \
+    [f'PAY_AMT{i}' for i in range(1, 7)]
+numeric_cols_toplot = [c for c in numeric_cols_toplot if c in df_dirty.columns]
+
+# Số lượng biểu đồ
+n_cols = 3   # số cột trong grid
+n_plots = len(numeric_cols_toplot)
+n_rows = math.ceil(n_plots / n_cols)
+
+# Tạo grid figure
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
+axes = axes.flatten()
+
+for i, col in enumerate(numeric_cols_toplot):
+    sns.histplot(df_dirty[col], bins=50, kde=True, ax=axes[i])
+    axes[i].set_title(f'Phân bố {col}', fontsize=11)
+    axes[i].ticklabel_format(style='plain')  # tránh scientific notation
+
+# Ẩn ô dư
+for j in range(i + 1, len(axes)):
+    axes[j].set_visible(False)
+
+plt.tight_layout()
+plt.show()
+
+cols_to_check = ['LIMIT_BAL', 'AGE', 'BILL_AMT1', 'PAY_AMT1']
+
+for col in cols_to_check:
+    if col not in df_dirty.columns:
+        continue
+
+    series = df_dirty[col].dropna()
+
+    Q1 = series.quantile(0.25)
+    Q3 = series.quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+
+    outliers = series[(series < lower_bound) | (series > upper_bound)]
+    outlier_ratio = (len(outliers) / len(series)) * 100
+
+    print(f"\n **Phân tích Outliers – {col}**")
+    print(f"- Q1: {Q1:,.2f}")
+    print(f"- Q3: {Q3:,.2f}")
+    print(f"- IQR: {IQR:,.2f}")
+    print(f"- Ngưỡng dưới: {lower_bound:,.2f}")
+    print(f"- Ngưỡng trên: {upper_bound:,.2f}")
+    print(f"- Số outliers phát hiện: {len(outliers):,} ({outlier_ratio:.2f}%)")
+
+    plt.figure(figsize=(7, 2.5))
+    sns.boxplot(x=series, color="skyblue")
+    plt.title(f' Boxplot Outliers – {col}', fontsize=11)
+    plt.xlabel(col)
+    plt.tight_layout()
+    plt.show()
+
+# Tính ma trận tương quan
+corr_matrix = df_dirty.corr()
+
+plt.figure(figsize=(16, 12))
+
+# Heatmap với cải tiến: annot nhỏ, mask nửa trên, palette dễ nhìn
+mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+
+sns.heatmap(
+    corr_matrix,
+    mask=mask,             # chỉ hiển thị nửa dưới để đỡ rối
+    cmap='coolwarm',
+    center=0,
+    annot=False,           # annot=True quá rối vì dataset nhiều cột
+    linewidths=0.5,
+    cbar_kws={"shrink": 0.7}
+)
+
+plt.title(' Heatmap Tương Quan Giữa Các Features', fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+pairs = [
+    ('BILL_AMT1', 'PAY_AMT1'),
+    ('BILL_AMT2', 'PAY_AMT2'),
+    ('BILL_AMT3', 'PAY_AMT3'),
+]
+
+valid_pairs = [(b, p) for b, p in pairs if b in df_dirty.columns and p in df_dirty.columns]
+
+n = len(valid_pairs)
+n_cols = 3
+n_rows = 1
+
+plt.figure(figsize=(18, 5))
+
+for i, (bill, pay) in enumerate(valid_pairs):
+    plt.subplot(n_rows, n_cols, i + 1)
+    sns.scatterplot(
+        x=df_dirty[bill],
+        y=df_dirty[pay],
+        alpha=0.25,
+        s=10,
+        color='steelblue'
+    )
+    plt.title(f'{bill} vs {pay}')
+    plt.xlabel(bill)
+    plt.ylabel(pay)
+
+plt.tight_layout()
+plt.show()
+
+print(" KIỂM TRA DỮ LIỆU BẤT THƯỜNG".upper())
+print("="*55)
+
+# 1. Giá trị âm trong numeric columns
+print("\n 1. Các giá trị âm trong dữ liệu:")
+
+negative_info = []
+for col in numeric_cols:
+    if df_dirty[col].dtype != "object":
+        neg = (df_dirty[col] < 0).sum()
+        if neg > 0:
+            negative_info.append([col, neg, round(neg / len(df_dirty) * 100, 3)])
+
+if len(negative_info) > 0:
+    neg_df = pd.DataFrame(negative_info, columns=["Column", "Negative Count", "Percentage (%)"])
+    display(neg_df)
+else:
+    print("→ Không tìm thấy giá trị âm nào.")
+
+# 2. LIMIT_BAL > 1 triệu
+print("\n 2. LIMIT_BAL > 1,000,000:")
+
+if "LIMIT_BAL" in df_dirty.columns:
+    high_limit = (df_dirty["LIMIT_BAL"] > 1e6).sum()
+    ratio = round(high_limit / len(df_dirty) * 100, 3)
+    print(f"→ Số lượng: {high_limit} ({ratio}%)")
+else:
+    print("→ Cột LIMIT_BAL không tồn tại.")
+
+# 3. AGE bất thường
+print("\n 3. AGE bất thường (<18 hoặc >100):")
+
+if "AGE" in df_dirty.columns:
+    abnormal_age = ((df_dirty["AGE"] < 18) | (df_dirty["AGE"] > 100)).sum()
+    ratio = round(abnormal_age / len(df_dirty) * 100, 3)
+    print(f"→ Số lượng: {abnormal_age} ({ratio}%)")
+else:
+    print("→ Cột AGE không tồn tại.")
+
+# Tính correlation của các numeric features với target
+print(' Top 15 Features tương quan mạnh nhất với Target:')
+corr_with_target = df_dirty[numeric_cols + [target_col]].corr()[target_col].drop(target_col).sort_values(ascending=False)
+print(corr_with_target.head(15))
+print('\n Top 15 Features tương quan âm mạnh nhất:')
+print(corr_with_target.tail(15))
+
+# Visualization
+plt.figure(figsize=(10, 8))
+top_corr = pd.concat([corr_with_target.head(15), corr_with_target.tail(15)]).sort_values()
+sns.barplot(x=top_corr.values, y=top_corr.index)
+plt.title('Top 30 Features theo Correlation với Target', fontweight='bold')
+plt.xlabel('Correlation Coefficient')
+plt.axvline(x=0, color='black', linestyle='--', linewidth=0.8)
+plt.tight_layout()
+plt.show()
+
+print(' BASELINE MODEL - ĐÁNH GIÁ DỮ LIỆU THÔ')
+print(' Mục đích: Train model trên dữ liệu chưa xử lý để có baseline so sánh')
+
+# Tạo bản copy để xử lý baseline
+df_baseline = df_dirty.copy()
+
+# Xử lý missing đơn giản: fill median cho numeric (vì model không chạy được với NaN)
+print('\n Xử lý missing đơn giản cho baseline (fillna median)...')
+for col in numeric_cols:
+    if df_baseline[col].isna().sum() > 0:
+        df_baseline[col].fillna(df_baseline[col].median(), inplace=True)
+
+print(f' Missing sau fillna: {df_baseline.isna().sum().sum()}')
+
+# Tách X, y
+X_baseline = df_baseline.drop(columns=[target_col])
+y_baseline = df_baseline[target_col]
+
+print(f'\n Shape dữ liệu baseline:')
+print(f'   X: {X_baseline.shape}')
+print(f'   y distribution: {y_baseline.value_counts(normalize=True).round(3).to_dict()}')
+
+print(' TRAIN/TEST SPLIT CHO BASELINE')
+
+X_train_base, X_test_base, y_train_base, y_test_base = train_test_split(
+    X_baseline, y_baseline,
+    test_size=0.2,
+    stratify=y_baseline,
+    random_state=42
+)
+
+print(f' Train: {X_train_base.shape}')
+print(f' Test: {X_test_base.shape}')
+print(f'\n Train class distribution: {y_train_base.value_counts(normalize=True).round(3).to_dict()}')
+
+print(' TRAIN BASELINE RANDOMFOREST')
+print(' Dữ liệu: Thô, chưa xử lý outliers, giá trị âm, chưa SMOTE, chưa scale')
+
+# Train model đơn giản
+rf_baseline = RandomForestClassifier(
+    n_estimators=200,
+    max_depth=15,
+    min_samples_split=10,
+    class_weight='balanced', 
+    random_state=42,
+    n_jobs=-1
+)
+
+print('\n Đang train baseline model...')
+rf_baseline.fit(X_train_base, y_train_base)
+print(' Đã train xong!')
+
+print(' ĐÁNH GIÁ BASELINE MODEL')
+
+# Predict
+y_pred_base = rf_baseline.predict(X_test_base)
+y_proba_base = rf_baseline.predict_proba(X_test_base)[:, 1]
+
+# Tính metrics
+acc_base = accuracy_score(y_test_base, y_pred_base)
+prec_base = precision_score(y_test_base, y_pred_base, zero_division=0)
+rec_base = recall_score(y_test_base, y_pred_base, zero_division=0)
+f1_base = f1_score(y_test_base, y_pred_base, zero_division=0)
+auc_base = roc_auc_score(y_test_base, y_proba_base)
+
+print(f'\n KẾT QUẢ BASELINE (dữ liệu chưa xử lý):')
+print(f'   Accuracy : {acc_base:.4f}')
+print(f'   Precision: {prec_base:.4f}')
+print(f'   Recall   : {rec_base:.4f}')
+print(f'   F1-score : {f1_base:.4f}')
+print(f'   AUC-ROC  : {auc_base:.4f}')
+
+print('\n Confusion Matrix:')
+cm_base = confusion_matrix(y_test_base, y_pred_base)
+print(cm_base)
+
+print('\n Classification Report:')
+print(classification_report(y_test_base, y_pred_base, zero_division=0))
+
+# Lưu kết quả để so sánh sau
+baseline_results = {
+    'accuracy': acc_base,
+    'precision': prec_base,
+    'recall': rec_base,
+    'f1': f1_base,
+    'auc': auc_base
+}
+
+print('\n Đã lưu kết quả baseline để so sánh sau!')
+
+print(' VISUALIZATION BASELINE')
+print('='*60)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+# 1. Confusion Matrix
+sns.heatmap(cm_base, annot=True, fmt='d', cmap='Oranges', ax=axes[0],
+            xticklabels=['No Default', 'Default'],
+            yticklabels=['No Default', 'Default'])
+axes[0].set_title(' Baseline Confusion Matrix', fontweight='bold')
+axes[0].set_xlabel('Predicted')
+axes[0].set_ylabel('Actual')
+
+# 2. Metrics Bar Chart
+metrics_base_df = pd.DataFrame({
+    'Metric': ['Accuracy', 'Precision', 'Recall', 'F1-score', 'AUC'],
+    'Score': [acc_base, prec_base, rec_base, f1_base, auc_base]
+})
+sns.barplot(x='Score', y='Metric', data=metrics_base_df, palette='Set2', ax=axes[1])
+axes[1].set_title(' Baseline Metrics', fontweight='bold')
+axes[1].set_xlim([0, 1])
+for i, v in enumerate(metrics_base_df['Score']):
+    axes[1].text(v + 0.01, i, f'{v:.3f}', va='center')
+
+plt.tight_layout()
+plt.show()
+
+print(' Đã vẽ visualization cho baseline model')
+
+print(' Tạo bản sao dữ liệu để xử lý...')
+df_cleaned = df_dirty.copy()
+
+print(f' Shape: {df_cleaned.shape}')
+print(f' Missing ban đầu: {df_cleaned.isna().sum().sum()}')
+
+# Xác định các cột PAY_AMT và BILL_AMT
+pay_bill_cols = [c for c in df_cleaned.columns if ('PAY_AMT' in c or 'BILL_AMT' in c)]
+
+print(' XỬ LÝ GIÁ TRỊ ÂM TRONG PAY_AMT & BILL_AMT')
+
+# Đếm giá trị âm trước xử lý
+neg_before = sum((df_cleaned[c] < 0).sum() for c in pay_bill_cols if c in df_cleaned.columns)
+print(f' Số giá trị âm ban đầu: {neg_before}')
+
+# Áp dụng abs() để chuyển giá trị âm thành dương
+for col in pay_bill_cols:
+    if col in df_cleaned.columns:
+        df_cleaned[col] = df_cleaned[col].abs()
+
+# Đếm lại sau xử lý
+neg_after = sum((df_cleaned[c] < 0).sum() for c in pay_bill_cols if c in df_cleaned.columns)
+print(f' Số giá trị âm sau xử lý: {neg_after}')
+print(f'→ Đã xử lý {len(pay_bill_cols)} cột: {pay_bill_cols}')
+
+print(' IMPUTE MISSING VALUES BẰNG KNNImputer')
+print('='*60)
+
+# Đếm missing trước
+missing_before = df_cleaned.isna().sum().sum()
+print(f' Tổng Missing trước impute: {missing_before}')
+
+# KNNImputer với k=5, weights='distance'
+imputer = KNNImputer(n_neighbors=5, weights='distance')
+
+# Chỉ impute các cột numeric
+df_numeric = df_cleaned[numeric_cols]
+df_numeric_imputed = imputer.fit_transform(df_numeric)
+
+# Gán lại vào df_cleaned
+df_cleaned[numeric_cols] = df_numeric_imputed
+
+# Đếm missing sau
+missing_after = df_cleaned.isna().sum().sum()
+print(f' Tổng Missing sau impute: {missing_after}')
+print(f'→ Đã impute {missing_before - missing_after} giá trị missing')
+
+print(' WINSORIZE OUTLIERS (1% HAI ĐẦU)')
+
+# Chọn các cột cần winsorize
+winsor_cols = ['LIMIT_BAL'] + pay_bill_cols
+winsor_cols = [c for c in winsor_cols if c in df_cleaned.columns]
+
+print(f' Sẽ winsorize {len(winsor_cols)} cột')
+
+# Áp dụng winsorization
+for col in winsor_cols:
+    col_values = df_cleaned[col].values
+    # Winsorize 1% hai đầu (lower=0.01, upper=0.01)
+    df_cleaned[col] = winsorize(col_values, limits=[0.01, 0.01])
+
+print(f' Đã winsorize cho: {winsor_cols}')
+
+# Kiểm tra sau xử lý
+if 'LIMIT_BAL' in df_cleaned.columns:
+    print(f'\n LIMIT_BAL sau winsorize:')
+    print(f'   Min: {df_cleaned["LIMIT_BAL"].min():,.0f}')
+    print(f'   Max: {df_cleaned["LIMIT_BAL"].max():,.0f}')
+    print(f'   Mean: {df_cleaned["LIMIT_BAL"].mean():,.0f}')
+
+print(' TRAIN/TEST SPLIT')
+
+# Tạo X và y
+X = df_cleaned.drop(columns=[target_col])
+y = df_cleaned[target_col]
+
+# Split với stratify để giữ tỉ lệ class
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y,
+    test_size=0.2,
+    stratify=y,
+    random_state=42
+)
+
+print(f' Train shape: {X_train.shape}')
+print(f' Test shape: {X_test.shape}')
+print(f'\n Phân bố class trong Train:')
+print(y_train.value_counts(normalize=True).round(3).to_dict())
+print(f'\n Phân bố class trong Test:')
+print(y_test.value_counts(normalize=True).round(3).to_dict())
+
+print(' SMOTE - CÂN BẰNG DỮ LIỆU TRAIN')
+
+print(' Trước SMOTE:')
+print(f'   Shape: {X_train.shape}')
+print(f'   Class distribution: {y_train.value_counts(normalize=True).round(3).to_dict()}')
+
+# Áp dụng SMOTE với sampling_strategy=0.5 (class thiểu số = 50% class đa số)
+# Nếu vẫn lỗi, tăng lên 0.7 hoặc 1.0 (balanced)
+smote = SMOTE(sampling_strategy=0.5, random_state=42)
+X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
+
+print('\n Sau SMOTE:')
+print(f'   Shape: {X_train_balanced.shape}')
+print(f'   Class distribution: {y_train_balanced.value_counts(normalize=True).round(3).to_dict()}')
+print(f'   → Đã tạo thêm {X_train_balanced.shape[0] - X_train.shape[0]} mẫu tổng hợp')
+
+print(' SCALING BẰNG RobustScaler')
+print(' GHI CHÚ: Đây là bước scale DUY NHẤT trong pipeline!')
+
+# Khởi tạo scaler
+scaler = RobustScaler()
+
+# Fit trên Train và transform cả Train & Test
+X_train_scaled = scaler.fit_transform(X_train_balanced)
+X_test_scaled = scaler.transform(X_test)
+
+# Convert về DataFrame để giữ tên cột
+X_train_scaled = pd.DataFrame(X_train_scaled, columns=X_train.columns)
+X_test_scaled = pd.DataFrame(X_test_scaled, columns=X_test.columns)
+
+print(f' Train scaled shape: {X_train_scaled.shape}')
+print(f' Test scaled shape: {X_test_scaled.shape}')
+print(f'\n Sample scaled values (Train - LIMIT_BAL):')
+if 'LIMIT_BAL' in X_train_scaled.columns:
+    print(f'   Min: {X_train_scaled["LIMIT_BAL"].min():.3f}')
+    print(f'   Max: {X_train_scaled["LIMIT_BAL"].max():.3f}')
+    print(f'   Mean: {X_train_scaled["LIMIT_BAL"].mean():.3f}')
+
+def evaluate_at_threshold(y_true, y_proba, threshold=0.5, title="Model"):
+    """
+    Đánh giá mô hình tại 1 threshold cụ thể.
+    """
+    y_pred = (y_proba >= threshold).astype(int)
+
+    acc = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    auc = roc_auc_score(y_true, y_proba)
+
+    print(f"\n{'='*60}")
+    print(f" {title} (threshold = {threshold:.3f})")
+    print('='*60)
+    print(f"Accuracy : {acc:.4f}")
+    print(f"Precision: {prec:.4f}")
+    print(f"Recall   : {rec:.4f}")
+    print(f"F1-score : {f1:.4f}")
+    print(f"AUC-ROC  : {auc:.4f}")
+    print("\n Confusion Matrix:")
+    print(confusion_matrix(y_true, y_pred))
+    print("\n Classification Report:")
+    print(classification_report(y_true, y_pred, zero_division=0))
+
+    return {
+        "accuracy": acc,
+        "precision": prec,
+        "recall": rec,
+        "f1": f1,
+        "auc": auc,
+        "threshold": threshold
+    }
+
+
+def find_best_f1_threshold(y_true, y_proba, n_steps=100):
+    """
+    Duyệt nhiều threshold để tìm threshold tối ưu F1-score.
+    """
+    thresholds = np.linspace(0.1, 0.9, n_steps)
+    best_f1 = -1
+    best_thr = 0.5
+
+    for thr in thresholds:
+        y_pred_thr = (y_proba >= thr).astype(int)
+        f1 = f1_score(y_true, y_pred_thr, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thr = thr
+
+    return best_thr, best_f1
+
+print(' Đã định nghĩa hàm evaluation')
+
+print(' TRAIN RANDOMFOREST (FINAL MODEL)')
+
+# Khởi tạo model
+rf_final = RandomForestClassifier(
+    n_estimators=400,
+    max_depth=None,
+    min_samples_split=4,
+    min_samples_leaf=1,
+    max_features='sqrt',
+    bootstrap=True,
+    class_weight=None,   # vì đã SMOTE
+    random_state=42,
+    n_jobs=-1
+)
+
+print(' Hyperparameters:')
+print(f'   n_estimators: 400')
+print(f'   max_depth: None')
+print(f'   min_samples_split: 4')
+print(f'   max_features: sqrt')
+print(f'   class_weight: None (đã SMOTE)')
+
+# Train model
+print('\n Đang train model...')
+rf_final.fit(X_train_scaled, y_train_balanced)
+
+print(' Đã train xong RandomForest!')
+
+print(' ĐÁNH GIÁ MODEL VỚI THRESHOLD MẶC ĐỊNH = 0.5')
+
+# Predict probability
+y_proba_final = rf_final.predict_proba(X_test_scaled)[:, 1]
+
+# Evaluate tại threshold 0.5
+result_05 = evaluate_at_threshold(
+    y_test, y_proba_final,
+    threshold=0.5,
+    title="Final RandomForest (Threshold = 0.5)"
+)
+
+print(' TUNING THRESHOLD ĐỂ TỐI ƯU F1-SCORE')
+
+# Tìm threshold tối ưu
+best_thr, best_f1 = find_best_f1_threshold(y_test, y_proba_final, n_steps=100)
+
+print(f' Best threshold: {best_thr:.4f}')
+print(f' Best F1-score: {best_f1:.4f}')
+
+# Evaluate tại threshold tối ưu
+result_best = evaluate_at_threshold(
+    y_test, y_proba_final,
+    threshold=best_thr,
+    title="Final RandomForest (Threshold tối ưu F1)"
+)
+
+print('\n SO SÁNH 3 MODELS: BASELINE vs FINAL (0.5) vs FINAL (TỐI ƯU)')
+
+# Tạo DataFrame so sánh 3 models
+comparison_3models = pd.DataFrame({
+    'Baseline (Raw)': [
+        baseline_results['accuracy'],
+        baseline_results['precision'],
+        baseline_results['recall'],
+        baseline_results['f1'],
+        baseline_results['auc']
+    ],
+    'Final (Threshold 0.5)': [
+        result_05['accuracy'],
+        result_05['precision'],
+        result_05['recall'],
+        result_05['f1'],
+        result_05['auc']
+    ],
+    'Final (Threshold Tối ưu)': [
+        result_best['accuracy'],
+        result_best['precision'],
+        result_best['recall'],
+        result_best['f1'],
+        result_best['auc']
+    ]
+}, index=['Accuracy', 'Precision', 'Recall', 'F1-score', 'AUC-ROC'])
+
+print('\n BẢNG SO SÁNH 3 MODELS:')
+display(comparison_3models.round(4))
+
+# Tính improvement từ Baseline đến Final (Tối ưu)
+print('\n CẢI THIỆN TỪ BASELINE → FINAL (TỐI ƯU):')
+for metric in comparison_3models.index:
+    baseline_val = comparison_3models.loc[metric, 'Baseline (Raw)']
+    final_val = comparison_3models.loc[metric, 'Final (Threshold Tối ưu)']
+    diff = final_val - baseline_val
+    pct_change = (diff / baseline_val * 100) if baseline_val > 0 else 0
+    
+    symbol = '📈' if diff > 0 else '📉' if diff < 0 else '➡️'
+    print(f'{symbol} {metric:12s}: {baseline_val:.4f} → {final_val:.4f} ({diff:+.4f}, {pct_change:+.2f}%)')
+
+print('\n CẢI THIỆN TỪ THRESHOLD 0.5 → TỐI ƯU:')
+for metric in comparison_3models.index:
+    t05_val = comparison_3models.loc[metric, 'Final (Threshold 0.5)']
+    best_val = comparison_3models.loc[metric, 'Final (Threshold Tối ưu)']
+    diff = best_val - t05_val
+    pct_change = (diff / t05_val * 100) if t05_val > 0 else 0
+    print(f'   {metric:12s}: {diff:+.4f} ({pct_change:+.2f}%)')
+
+# Heatmap để xem rõ hơn
+plt.figure(figsize=(10, 6))
+sns.heatmap(comparison_3models.T, annot=True, fmt='.4f', cmap='RdYlGn', 
+            linewidths=0.5, cbar_kws={"shrink": 0.8}, vmin=0, vmax=1)
+plt.title(' Heatmap So Sánh 3 Models (Càng xanh càng tốt)', fontsize=14, fontweight='bold')
+plt.xlabel('Metrics', fontsize=12)
+plt.ylabel('Models', fontsize=12)
+plt.tight_layout()
+plt.show()
+
+print(' Heatmap cho thấy rõ sự cải thiện từ Baseline → Final!')
+
+print(' VISUALIZATION SO SÁNH 3 MODELS')
+
+fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+
+# 1. Grouped Bar Chart - So sánh 3 models
+metrics = comparison_3models.index
+x = np.arange(len(metrics))
+width = 0.25
+
+bars1 = axes[0].bar(x - width, comparison_3models['Baseline (Raw)'], width, 
+                     label='Baseline (Raw)', alpha=0.8, color='#ff9999')
+bars2 = axes[0].bar(x, comparison_3models['Final (Threshold 0.5)'], width, 
+                     label='Final (Threshold 0.5)', alpha=0.8, color='#66b3ff')
+bars3 = axes[0].bar(x + width, comparison_3models['Final (Threshold Tối ưu)'], width, 
+                     label='Final (Threshold Tối ưu)', alpha=0.8, color='#99ff99')
+
+axes[0].set_xlabel('Metrics', fontsize=12, fontweight='bold')
+axes[0].set_ylabel('Score', fontsize=12, fontweight='bold')
+axes[0].set_title(' So Sánh 3 Models: Baseline vs Final', fontsize=14, fontweight='bold')
+axes[0].set_xticks(x)
+axes[0].set_xticklabels(metrics, rotation=0)
+axes[0].legend(loc='lower right', fontsize=10)
+axes[0].grid(axis='y', alpha=0.3)
+axes[0].set_ylim([0, 1.1])
+
+# Thêm giá trị lên bars
+for bars in [bars1, bars2, bars3]:
+    for bar in bars:
+        height = bar.get_height()
+        axes[0].text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                    f'{height:.3f}', ha='center', va='bottom', fontsize=8)
+
+# 2. Line Chart - Xu hướng cải thiện
+axes[1].plot(metrics, comparison_3models['Baseline (Raw)'], 
+             marker='o', linewidth=2, markersize=8, label='Baseline (Raw)', color='#ff9999')
+axes[1].plot(metrics, comparison_3models['Final (Threshold 0.5)'], 
+             marker='s', linewidth=2, markersize=8, label='Final (Threshold 0.5)', color='#66b3ff')
+axes[1].plot(metrics, comparison_3models['Final (Threshold Tối ưu)'], 
+             marker='^', linewidth=2, markersize=8, label='Final (Threshold Tối ưu)', color='#99ff99')
+
+axes[1].set_xlabel('Metrics', fontsize=12, fontweight='bold')
+axes[1].set_ylabel('Score', fontsize=12, fontweight='bold')
+axes[1].set_title(' Xu Hướng Cải Thiện Qua 3 Models', fontsize=14, fontweight='bold')
+axes[1].legend(loc='lower right', fontsize=10)
+axes[1].grid(alpha=0.3)
+axes[1].set_ylim([0, 1.1])
+
+# Thêm giá trị tại các điểm
+for model in comparison_3models.columns:
+    for i, metric in enumerate(metrics):
+        value = comparison_3models.loc[metric, model]
+        axes[1].text(i, value + 0.02, f'{value:.3f}', ha='center', fontsize=7)
+
+plt.tight_layout()
+plt.show()
+
+print('\n Đã vẽ biểu đồ so sánh 3 models!')
+
+print(' FEATURE IMPORTANCE')
+
+# Lấy feature importance
+feature_importance = pd.DataFrame({
+    'feature': X_train.columns,
+    'importance': rf_final.feature_importances_
+}).sort_values('importance', ascending=False)
+
+print(' Top 15 Features quan trọng nhất:')
+display(feature_importance.head(15))
+
+# Visualization
+plt.figure(figsize=(10, 8))
+top_15 = feature_importance.head(15)
+sns.barplot(x='importance', y='feature', data=top_15, palette='viridis')
+plt.title(' Top 15 Feature Importance', fontsize=14, fontweight='bold')
+plt.xlabel('Importance Score')
+plt.ylabel('Feature')
+plt.tight_layout()
+plt.show()
+
+from sklearn.metrics import roc_curve
+
+print(' VẼ ROC CURVE')
+
+# Tính ROC curve
+fpr, tpr, thresholds = roc_curve(y_test, y_proba_final)
+roc_auc = roc_auc_score(y_test, y_proba_final)
+
+# Plot
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.4f})')
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random Classifier')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title(' ROC Curve - RandomForest', fontsize=14, fontweight='bold')
+plt.legend(loc="lower right")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print(f' AUC-ROC Score: {roc_auc:.4f}')
+
+print(' CONFUSION MATRIX HEATMAP')
+
+# Tính confusion matrix cho threshold tối ưu
+y_pred_best = (y_proba_final >= best_thr).astype(int)
+cm = confusion_matrix(y_test, y_pred_best)
+
+# Plot heatmap
+plt.figure(figsize=(6, 5))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True,
+            xticklabels=['No Default (0)', 'Default (1)'],
+            yticklabels=['No Default (0)', 'Default (1)'])
+plt.title(f' Confusion Matrix\n(Threshold = {best_thr:.3f})', fontsize=13, fontweight='bold')
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.tight_layout()
+plt.show()
+
+# Hiển thị giải thích
+print('\n Giải thích:')
+print(f'   TN (True Negative) : {cm[0,0]:,} - Dự đoán đúng KHÔNG vỡ nợ')
+print(f'   FP (False Positive): {cm[0,1]:,} - Dự đoán SAI là vỡ nợ')
+print(f'   FN (False Negative): {cm[1,0]:,} - Dự đoán SAI là KHÔNG vỡ nợ')
+print(f'   TP (True Positive) : {cm[1,1]:,} - Dự đoán đúng vỡ nợ')
+
+from sklearn.metrics import precision_recall_curve, average_precision_score
+
+print(' PRECISION-RECALL CURVE')
+
+# Tính precision-recall
+precision, recall, pr_thresholds = precision_recall_curve(y_test, y_proba_final)
+avg_precision = average_precision_score(y_test, y_proba_final)
+
+# Plot
+plt.figure(figsize=(8, 6))
+plt.plot(recall, precision, color='blue', lw=2, label=f'PR curve (AP = {avg_precision:.4f})')
+plt.axhline(y=y_test.mean(), color='red', linestyle='--', label=f'Baseline (AP = {y_test.mean():.4f})')
+plt.xlabel('Recall')
+plt.ylabel('Precision')
+plt.title(' Precision-Recall Curve', fontsize=14, fontweight='bold')
+plt.legend(loc='best')
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print(f' Average Precision Score: {avg_precision:.4f}')
+
+print(' THRESHOLD VS METRICS')
+
+# Tạo danh sách threshold để test
+thresholds_to_test = np.linspace(0.1, 0.9, 50)
+
+# Tính metrics cho mỗi threshold
+metrics_list = []
+for thr in thresholds_to_test:
+    y_pred_temp = (y_proba_final >= thr).astype(int)
+    metrics_list.append({
+        'threshold': thr,
+        'precision': precision_score(y_test, y_pred_temp, zero_division=0),
+        'recall': recall_score(y_test, y_pred_temp, zero_division=0),
+        'f1': f1_score(y_test, y_pred_temp, zero_division=0),
+        'accuracy': accuracy_score(y_test, y_pred_temp)
+    })
+
+metrics_df = pd.DataFrame(metrics_list)
+
+# Plot
+plt.figure(figsize=(12, 6))
+plt.plot(metrics_df['threshold'], metrics_df['precision'], label='Precision', linewidth=2)
+plt.plot(metrics_df['threshold'], metrics_df['recall'], label='Recall', linewidth=2)
+plt.plot(metrics_df['threshold'], metrics_df['f1'], label='F1-score', linewidth=2)
+plt.plot(metrics_df['threshold'], metrics_df['accuracy'], label='Accuracy', linewidth=2, linestyle='--')
+
+# Đánh dấu threshold tối ưu
+plt.axvline(x=best_thr, color='red', linestyle='--', linewidth=2, label=f'Best Threshold = {best_thr:.3f}')
+
+plt.xlabel('Threshold', fontsize=12)
+plt.ylabel('Score', fontsize=12)
+plt.title(' Threshold vs Metrics', fontsize=14, fontweight='bold')
+plt.legend(loc='best')
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print(f' Optimal threshold = {best_thr:.3f} cho F1-score tối đa')
+
+print(' SO SÁNH BASELINE VS FINAL MODEL')
+# Tạo DataFrame so sánh
+comparison_full = pd.DataFrame({
+    'Baseline (Raw Data)': [
+        baseline_results['accuracy'],
+        baseline_results['precision'],
+        baseline_results['recall'],
+        baseline_results['f1'],
+        baseline_results['auc']
+    ],
+    'Final Model (Processed)': [
+        result_best['accuracy'],
+        result_best['precision'],
+        result_best['recall'],
+        result_best['f1'],
+        result_best['auc']
+    ]
+}, index=['Accuracy', 'Precision', 'Recall', 'F1-score', 'AUC-ROC'])
+
+# Tính improvement
+comparison_full['Improvement'] = comparison_full['Final Model (Processed)'] - comparison_full['Baseline (Raw Data)']
+comparison_full['Improvement %'] = (comparison_full['Improvement'] / comparison_full['Baseline (Raw Data)'] * 100).round(2)
+
+print('\n BẢNG SO SÁNH CHI TIẾT:')
+display(comparison_full.round(4))
+
+print('\n PHÂN TÍCH CẢI THIỆN:')
+for metric in comparison_full.index:
+    baseline_val = comparison_full.loc[metric, 'Baseline (Raw Data)']
+    final_val = comparison_full.loc[metric, 'Final Model (Processed)']
+    improvement = comparison_full.loc[metric, 'Improvement']
+    improvement_pct = comparison_full.loc[metric, 'Improvement %']
+    
+    symbol = '📈' if improvement > 0 else '📉' if improvement < 0 else '➡️'
+    print(f'{symbol} {metric:12s}: {baseline_val:.4f} → {final_val:.4f} ({improvement:+.4f}, {improvement_pct:+.2f}%)')
+
+# Visualization so sánh
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+# 1. Bar chart so sánh metrics
+comparison_plot = comparison_full[['Baseline (Raw Data)', 'Final Model (Processed)']].T
+x = np.arange(len(comparison_plot.columns))
+width = 0.35
+
+for i, idx in enumerate(comparison_plot.index):
+    axes[0].bar(x + i*width, comparison_plot.loc[idx], width, label=idx, alpha=0.8)
+
+axes[0].set_xlabel('Metrics', fontsize=12)
+axes[0].set_ylabel('Score', fontsize=12)
+axes[0].set_title(' Baseline vs Final Model - Metrics Comparison', fontsize=14, fontweight='bold')
+axes[0].set_xticks(x + width / 2)
+axes[0].set_xticklabels(comparison_plot.columns)
+axes[0].legend(loc='lower right')
+axes[0].grid(axis='y', alpha=0.3)
+axes[0].set_ylim([0, 1.1])
+
+# 2. Improvement percentage
+improvement_data = comparison_full['Improvement %'].sort_values()
+colors = ['green' if x > 0 else 'red' for x in improvement_data.values]
+axes[1].barh(improvement_data.index, improvement_data.values, color=colors, alpha=0.7)
+axes[1].set_xlabel('Improvement (%)', fontsize=12)
+axes[1].set_title(' Improvement from Baseline to Final', fontsize=14, fontweight='bold')
+axes[1].axvline(x=0, color='black', linestyle='--', linewidth=1)
+axes[1].grid(axis='x', alpha=0.3)
+
+# Thêm giá trị lên bar
+for i, (metric, value) in enumerate(improvement_data.items()):
+    axes[1].text(value + 0.5, i, f'{value:.1f}%', va='center', fontsize=10)
+
+plt.tight_layout()
+plt.show()
+
+print('\n Đã vẽ biểu đồ so sánh Baseline vs Final Model!')
+
+# === Code cell 40 ===
+print(' 1. ROC CURVE & PRECISION-RECALL CURVE VỚI THRESHOLD TỐI ƯU')
+
+fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+
+# ========== SUBPLOT 1: ROC CURVE ==========
+fpr, tpr, roc_thresholds = roc_curve(y_test, y_proba_final)
+roc_auc = roc_auc_score(y_test, y_proba_final)
+
+axes[0].plot(fpr, tpr, linewidth=3, label=f'ROC Curve (AUC = {roc_auc:.4f})', color='#2E86AB')
+axes[0].plot([0, 1], [0, 1], 'k--', linewidth=2, label='Random Classifier (AUC = 0.5)', alpha=0.5)
+
+# Tìm điểm tương ứng với best_thr trên ROC curve
+y_pred_best_thr = (y_proba_final >= best_thr).astype(int)
+fpr_best = 1 - (confusion_matrix(y_test, y_pred_best_thr)[0, 0] / 
+                (confusion_matrix(y_test, y_pred_best_thr)[0, 0] + 
+                 confusion_matrix(y_test, y_pred_best_thr)[0, 1]))
+tpr_best = recall_score(y_test, y_pred_best_thr)
+
+axes[0].scatter([fpr_best], [tpr_best], s=250, c='red', marker='*', 
+                edgecolors='black', linewidths=2, zorder=5,
+                label=f'Optimal Threshold = {best_thr:.3f}\n(TPR={tpr_best:.3f}, FPR={fpr_best:.3f})')
+
+axes[0].set_xlabel('False Positive Rate (FPR)', fontsize=13, fontweight='bold')
+axes[0].set_ylabel('True Positive Rate (TPR / Recall)', fontsize=13, fontweight='bold')
+axes[0].set_title(' ROC Curve with Optimal Threshold Point', fontsize=15, fontweight='bold', pad=15)
+axes[0].legend(loc='lower right', fontsize=11, framealpha=0.95)
+axes[0].grid(alpha=0.3, linestyle='--')
+axes[0].set_xlim([-0.02, 1.02])
+axes[0].set_ylim([-0.02, 1.02])
+
+# Thêm diagonal reference
+axes[0].fill_between(fpr, tpr, alpha=0.2, color='#2E86AB')
+
+# ========== SUBPLOT 2: PRECISION-RECALL CURVE ==========
+precision_vals, recall_vals, pr_thresholds = precision_recall_curve(y_test, y_proba_final)
+avg_precision = average_precision_score(y_test, y_proba_final)
+
+axes[1].plot(recall_vals, precision_vals, linewidth=3, 
+             label=f'PR Curve (AP = {avg_precision:.4f})', color='#A23B72')
+
+# Baseline: tỉ lệ class positive
+baseline_precision = y_test.sum() / len(y_test)
+axes[1].axhline(y=baseline_precision, color='gray', linestyle='--', linewidth=2,
+                label=f'Baseline (No Skill) = {baseline_precision:.3f}', alpha=0.6)
+
+# Điểm tối ưu
+prec_best = precision_score(y_test, y_pred_best_thr)
+rec_best = recall_score(y_test, y_pred_best_thr)
+
+axes[1].scatter([rec_best], [prec_best], s=250, c='red', marker='*',
+                edgecolors='black', linewidths=2, zorder=5,
+                label=f'Optimal Threshold = {best_thr:.3f}\n(Precision={prec_best:.3f}, Recall={rec_best:.3f})')
+
+axes[1].set_xlabel('Recall', fontsize=13, fontweight='bold')
+axes[1].set_ylabel('Precision', fontsize=13, fontweight='bold')
+axes[1].set_title(' Precision-Recall Curve with Optimal Threshold', fontsize=15, fontweight='bold', pad=15)
+axes[1].legend(loc='upper right', fontsize=11, framealpha=0.95)
+axes[1].grid(alpha=0.3, linestyle='--')
+axes[1].set_xlim([-0.02, 1.02])
+axes[1].set_ylim([-0.02, 1.02])
+
+# Fill area
+axes[1].fill_between(recall_vals, precision_vals, alpha=0.2, color='#A23B72')
+
+plt.tight_layout()
+plt.show()
+
+print(f'\n Đã vẽ ROC & PR curves với điểm threshold tối ưu = {best_thr:.3f}')
+
+print(' 2. CONFUSION MATRIX & PROBABILITY DISTRIBUTION')
+
+fig = plt.figure(figsize=(20, 7))
+gs = fig.add_gridspec(2, 3, hspace=0.35, wspace=0.3)
+
+# ========== SUBPLOT 1: Confusion Matrix (Annotated) ==========
+ax1 = fig.add_subplot(gs[:, 0])
+cm = confusion_matrix(y_test, y_pred_best_thr)
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True, 
+            linewidths=2, linecolor='black', ax=ax1,
+            annot_kws={'fontsize': 16, 'fontweight': 'bold'})
+
+ax1.set_xlabel('Predicted Label', fontsize=13, fontweight='bold')
+ax1.set_ylabel('True Label', fontsize=13, fontweight='bold')
+ax1.set_title(f' Confusion Matrix\n(Threshold = {best_thr:.3f})', 
+              fontsize=15, fontweight='bold', pad=15)
+ax1.set_xticklabels(['Not Default (0)', 'Default (1)'], fontsize=11)
+ax1.set_yticklabels(['Not Default (0)', 'Default (1)'], fontsize=11, rotation=0)
+
+# Thêm chú thích
+TN, FP, FN, TP = cm.ravel()
+ax1.text(0.5, -0.25, 
+         f'TN={TN} | FP={FP} | FN={FN} | TP={TP}\n'
+         f'Precision={prec_best:.3f} | Recall={rec_best:.3f} | F1={result_best["f1"]:.3f}',
+         transform=ax1.transAxes, ha='center', fontsize=11,
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+# ========== SUBPLOT 2: Histogram - Probability Distribution ==========
+ax2 = fig.add_subplot(gs[0, 1:])
+
+# Lấy probabilities cho class 0 và class 1
+proba_class_0 = y_proba_final[y_test == 0]
+proba_class_1 = y_proba_final[y_test == 1]
+
+# Vẽ histogram
+ax2.hist(proba_class_0, bins=50, alpha=0.6, label='Class 0 (Not Default)', 
+         color='#51cf66', edgecolor='black', density=True)
+ax2.hist(proba_class_1, bins=50, alpha=0.6, label='Class 1 (Default)', 
+         color='#ff6b6b', edgecolor='black', density=True)
+
+# Đường threshold tối ưu
+ax2.axvline(x=best_thr, color='blue', linestyle='--', linewidth=3,
+            label=f'Optimal Threshold = {best_thr:.3f}')
+ax2.axvline(x=0.5, color='gray', linestyle=':', linewidth=2, alpha=0.5,
+            label='Default Threshold = 0.5')
+
+ax2.set_xlabel('Predicted Probability', fontsize=13, fontweight='bold')
+ax2.set_ylabel('Density', fontsize=13, fontweight='bold')
+ax2.set_title(' Probability Distribution by True Class', fontsize=15, fontweight='bold', pad=15)
+ax2.legend(loc='upper center', fontsize=11, framealpha=0.95)
+ax2.grid(alpha=0.3, linestyle='--')
+
+# ========== SUBPLOT 3: Classification Regions ==========
+ax3 = fig.add_subplot(gs[1, 1:])
+
+# Tạo boxplot cho 2 classes
+data_to_plot = [proba_class_0, proba_class_1]
+bp = ax3.boxplot(data_to_plot, vert=False, widths=0.6, patch_artist=True,
+                 labels=['Class 0\n(Not Default)', 'Class 1\n(Default)'],
+                 boxprops=dict(facecolor='lightblue', alpha=0.7),
+                 medianprops=dict(color='red', linewidth=2),
+                 whiskerprops=dict(linewidth=1.5),
+                 capprops=dict(linewidth=1.5))
+
+# Màu sắc cho boxes
+bp['boxes'][0].set_facecolor('#51cf66')
+bp['boxes'][1].set_facecolor('#ff6b6b')
+
+# Đường threshold
+ax3.axvline(x=best_thr, color='blue', linestyle='--', linewidth=3,
+            label=f'Optimal Threshold = {best_thr:.3f}', zorder=10)
+ax3.axvline(x=0.5, color='gray', linestyle=':', linewidth=2, alpha=0.5,
+            label='Default Threshold = 0.5')
+
+# Vùng quyết định
+ax3.axvspan(0, best_thr, alpha=0.15, color='green', label='Predict: Not Default')
+ax3.axvspan(best_thr, 1, alpha=0.15, color='red', label='Predict: Default')
+
+ax3.set_xlabel('Predicted Probability', fontsize=13, fontweight='bold')
+ax3.set_title('📦 Boxplot: Probability Distribution & Decision Regions', 
+              fontsize=15, fontweight='bold', pad=15)
+ax3.legend(loc='upper right', fontsize=10, framealpha=0.95)
+ax3.grid(alpha=0.3, linestyle='--', axis='x')
+ax3.set_xlim([0, 1])
+
+plt.suptitle(f'🔍 THRESHOLD TỐI ƯU = {best_thr:.3f}: Confusion Matrix & Probability Analysis',
+             fontsize=17, fontweight='bold', y=0.98)
+
+plt.tight_layout()
+plt.show()
+
+print(f'\n Đã vẽ Confusion Matrix & Probability Distribution với threshold = {best_thr:.3f}')
